@@ -537,7 +537,10 @@ def train_drqa(cmdline_args, use_cuda=True):
     )
     add_train_args(parser)
     config.add_model_args(parser)
-    args = parser.parse_args(cmdline_args)
+    if cmdline_args != '':
+        args = parser.parse_args(cmdline_args)
+    else:
+        args = parser.parse_args()
     set_defaults(args)
 
     # Set cuda
@@ -570,3 +573,6 @@ def train_drqa(cmdline_args, use_cuda=True):
 
     # Run!
     return main(args)
+
+if __name__ == "__main__":
+    train_drqa('')
