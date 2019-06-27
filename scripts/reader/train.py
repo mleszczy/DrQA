@@ -14,7 +14,8 @@ import os
 import sys
 import subprocess
 import logging
-
+import pickle
+import pdb
 
 from drqa.reader import utils, vector, config, data
 from drqa.reader import DocReader
@@ -114,6 +115,8 @@ def add_train_args(parser):
                          help='Log state after every <display_iter> epochs')
     general.add_argument('--sort-by-len', type='bool', default=True,
                          help='Sort batches by length for speed')
+    runtime.add_argument('--eval_only', type=bool, default=False,
+                         help='Skip training')
 
 
 def set_defaults(args):
@@ -148,8 +151,13 @@ def set_defaults(args):
 
     # Embeddings options
     if args.embedding_file:
-        with open(args.embedding_file) as f:
-            dim = len(f.readline().strip().split(' ')) - 1
+        if "pkl" in args.embedding_file:
+            v, _ = pickle.load(open(args.embedding_file, "rb"))
+            dim = len(v)
+        else:
+            with open(args.embedding_file) as f:
+                dim = len(f.readline().strip().split(' ')) - 1
+
         args.embedding_dim = dim
     elif not args.embedding_dim:
         raise RuntimeError('Either embedding_file or embedding_dim '
@@ -286,6 +294,9 @@ def validate_official(args, data_loader, model, global_stats,
     f1 = utils.AverageMeter()
     exact_match = utils.AverageMeter()
 
+    fo1 = open(args.model_dir + "/" + args.model_name + "_score_em.txt", 'w')
+    fo2 = open(args.model_dir + "/" + args.model_name + "_score_f1.txt", 'w')
+    fo3 = open(args.model_dir + "/" + args.model_name + "_score_pd.txt", 'w') 
     # Run through examples
     examples = 0
     for ex in data_loader:
@@ -296,16 +307,20 @@ def validate_official(args, data_loader, model, global_stats,
             s_offset = offsets[ex_id[i]][pred_s[i][0]][0]
             e_offset = offsets[ex_id[i]][pred_e[i][0]][1]
             prediction = texts[ex_id[i]][s_offset:e_offset]
-
+            fo3.write(prediction + "\n")
             # Compute metrics
             ground_truths = answers[ex_id[i]]
             exact_match.update(utils.metric_max_over_ground_truths(
                 utils.exact_match_score, prediction, ground_truths))
             f1.update(utils.metric_max_over_ground_truths(
                 utils.f1_score, prediction, ground_truths))
+            fo1.write(str(exact_match.val) + "\n")
+            fo2.write(str(f1.val) + "\n")
 
         examples += batch_size
-
+    fo1.close()
+    fo2.close()
+    fo3.close()
     logger.info('dev valid official: Epoch = %d | EM = %.2f | ' %
                 (global_stats['epoch'], exact_match.avg * 100) +
                 'F1 = %.2f | examples = %d | valid time = %.2f (s)' %
@@ -318,10 +333,11 @@ def eval_accuracies(pred_s, target_s, pred_e, target_e):
     """An unofficial evalutation helper.
     Compute exact start/end/complete match accuracies for a batch.
     """
+    # pdb.set_trace()
     # Convert 1D tensors to lists of lists (compatibility)
     if torch.is_tensor(target_s):
-        target_s = [[e] for e in target_s]
-        target_e = [[e] for e in target_e]
+        target_s = [[e.data.numpy()] for e in target_s]
+        target_e = [[e.data.numpy()] for e in target_e]
 
     # Compute accuracies from targets
     batch_size = len(pred_s)
@@ -340,7 +356,7 @@ def eval_accuracies(pred_s, target_s, pred_e, target_e):
             end.update(1)
         else:
             end.update(0)
-
+        # pdb.set_trace()
         # Both start and end match
         if any([1 for _s, _e in zip(target_s[i], target_e[i])
                 if _s == pred_s[i] and _e == pred_e[i]]):
@@ -388,6 +404,10 @@ def main(args):
         if args.pretrained:
             logger.info('Using pretrained model...')
             model = DocReader.load(args.pretrained, args)
+            if args.eval_only:
+                logger.info('Resetting embeddings...')
+                word_dict = utils.build_word_dict(args, train_exs + dev_exs)
+                model.load_embeddings(word_dict.tokens(), args.embedding_file)
             if args.expand_dictionary:
                 logger.info('Expanding dictionary for new data...')
                 # Add words in training + dev examples
@@ -448,7 +468,7 @@ def main(args):
         pin_memory=args.cuda,
     )
     dev_dataset = data.ReaderDataset(dev_exs, model, single_answer=False)
-    if args.sort_by_len:
+    if args.sort_by_len or True:
         dev_sampler = data.SortedBatchSampler(dev_dataset.lengths(),
                                               args.test_batch_size,
                                               shuffle=False)
@@ -477,14 +497,17 @@ def main(args):
     for epoch in range(start_epoch, args.num_epochs):
         stats['epoch'] = epoch
 
-        # Train
-        train(args, train_loader, model, stats)
+        if not args.eval_only or epoch > 1:
+            # Train
+            train(args, train_loader, model, stats)
+        else:
+            logger.info('Evaluating only...')
 
-        # Validate unofficial (train)
-        validate_unofficial(args, train_loader, model, stats, mode='train')
+        # # Validate unofficial (train)
+        # validate_unofficial(args, train_loader, model, stats, mode='train')
 
-        # Validate unofficial (dev)
-        result = validate_unofficial(args, dev_loader, model, stats, mode='dev')
+        # # Validate unofficial (dev)
+        # result = validate_unofficial(args, dev_loader, model, stats, mode='dev')
 
         # Validate official
         if args.official_eval:

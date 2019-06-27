@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import numpy as np
 import logging
 import copy
+import pickle
+import pdb
 
 from torch.autograd import Variable
 from .config import override_model_args
@@ -102,28 +104,59 @@ class DocReader(object):
         embedding = self.network.embedding.weight.data
 
         # When normalized, some words are duplicated. (Average the embeddings).
+        # pdb.set_trace()
         vec_counts = {}
-        with open(embedding_file) as f:
-            for line in f:
-                parsed = line.rstrip().split(' ')
-                assert(len(parsed) == embedding.size(1) + 1)
-                w = self.word_dict.normalize(parsed[0])
-                if w in words:
-                    vec = torch.Tensor([float(i) for i in parsed[1:]])
-                    if w not in vec_counts:
-                        vec_counts[w] = 1
-                        embedding[self.word_dict[w]].copy_(vec)
-                    else:
-                        logging.warning(
-                            'WARN: Duplicate embedding found for %s' % w
-                        )
-                        vec_counts[w] = vec_counts[w] + 1
-                        embedding[self.word_dict[w]].add_(vec)
+        print(self.word_dict.ind2tok[10])
+        print(type(self.network.embedding.weight.data))
+        print(self.network.embedding.weight.data[10])
+        if "pkl" in embedding_file:
+            with open(embedding_file, "rb") as f:
+                vocab, emb = pickle.load(f)
+                for v, e in zip(vocab, emb):
+                    w = self.word_dict.normalize(v)
+                    if w in words:
+                        try:
+                            vec = torch.from_numpy(e)
+                        except:
+                            vec = e
+                        if w not in vec_counts:
+                            vec_counts[w] = 1
+                            embedding[self.word_dict[w]].copy_(vec)
+                        else:
+                            logging.warning(
+                                'WARN: Duplicate embedding found for %s' % w
+                            )
+                            vec_counts[w] = vec_counts[w] + 1
+                            embedding[self.word_dict[w]].add_(vec)
+        else:
+            with open(embedding_file) as f:
+                for line in f:
+                    parsed = line.rstrip().split(' ')
+                    assert(len(parsed) == embedding.size(1) + 1)
+                    w = self.word_dict.normalize(parsed[0])
+                    if w in words:
+                        vec = torch.Tensor([float(i) for i in parsed[1:]])
+                        if w not in vec_counts:
+                            vec_counts[w] = 1
+                            embedding[self.word_dict[w]].copy_(vec)
+                        else:
+                            logging.warning(
+                                'WARN: Duplicate embedding found for %s' % w
+                            )
+                            vec_counts[w] = vec_counts[w] + 1
+                            embedding[self.word_dict[w]].add_(vec)
+
 
         for w, c in vec_counts.items():
             embedding[self.word_dict[w]].div_(c)
 
         logger.info('Loaded %d embeddings (%.2f%%)' %
+                    (len(vec_counts), 100 * len(vec_counts) / len(words)))
+        print(self.network.embedding.weight.data[10])
+        # dump embeddings with vocab as list
+        vocab, _ = zip(*sorted(self.word_dict.tok2ind.items(), key=lambda x:x[1]))
+        pickle.dump((vocab, embedding), open(embedding_file+".pkl", "wb"))
+        logger.info('Dumping %d embeddings (%.2f%%)' %
                     (len(vec_counts), 100 * len(vec_counts) / len(words)))
 
     def tune_embeddings(self, words):

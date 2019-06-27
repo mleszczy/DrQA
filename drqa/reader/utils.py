@@ -11,6 +11,7 @@ import time
 import logging
 import string
 import regex as re
+import pickle
 
 from collections import Counter
 from .data import Dictionary
@@ -82,10 +83,16 @@ def load_answers(filename):
 def index_embedding_words(embedding_file):
     """Put all the words in embedding_file into a set."""
     words = set()
-    with open(embedding_file) as f:
-        for line in f:
-            w = Dictionary.normalize(line.rstrip().split(' ')[0])
+    if "pkl" in embedding_file:
+        vocab, _ = pickle.load(open(embedding_file, "rb"))
+        for line in vocab:
+            w = Dictionary.normalize(line)
             words.add(w)
+    else:
+        with open(embedding_file) as f:
+            for line in f:
+                w = Dictionary.normalize(line.rstrip().split(' ')[0])
+                words.add(w)
     return words
 
 
@@ -94,6 +101,7 @@ def load_words(args, examples):
     def _insert(iterable):
         for w in iterable:
             w = Dictionary.normalize(w)
+            all_words.add(w)
             if valid_words and w not in valid_words:
                 continue
             words.add(w)
@@ -106,9 +114,14 @@ def load_words(args, examples):
         valid_words = None
 
     words = set()
+    all_words = set()
     for ex in examples:
         _insert(ex['question'])
         _insert(ex['document'])
+    logger.info(f'# of overlapping words in dim: {len(words)}')
+    logger.info(f'# of words in train + dev: {len(all_words)}')
+    logger.info(f'% of the overlapping part: {len(words) / len(all_words)}')
+
     return words
 
 
