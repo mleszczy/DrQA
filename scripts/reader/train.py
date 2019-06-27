@@ -14,7 +14,7 @@ import os
 import sys
 import subprocess
 import logging
-
+import pickle
 
 from drqa.reader import utils, vector, config, data
 from drqa.reader import DocReader
@@ -62,6 +62,10 @@ def add_train_args(parser):
                          help='Batch size for training')
     runtime.add_argument('--test-batch-size', type=int, default=128,
                          help='Batch size during validation/testing')
+    runtime.add_argument('--predict', action='store_true',
+                         help='Generate and save predictions for official dev')
+    runtime.add_argument('--predictions', type=str,
+                         help='File to write predictions to')
 
     # Files
     files = parser.add_argument_group('Filesystem')
@@ -251,9 +255,11 @@ def validate_unofficial(args, data_loader, model, global_stats, mode):
 
     # Make predictions
     examples = 0
+    predictions = []
     for ex in data_loader:
         batch_size = ex[0].size(0)
         pred_s, pred_e, _ = model.predict(ex)
+        predictions.append(pred_s, pred_e)
         target_s, target_e = ex[-3:-1]
 
         # We get metrics for independent start/end and joint start/end
@@ -277,7 +283,7 @@ def validate_unofficial(args, data_loader, model, global_stats, mode):
 
 
 def validate_official(args, data_loader, model, global_stats,
-                      offsets, texts, answers):
+                      offsets, texts, answers, predict=False):
     """Run one full official validation. Uses exact spans and same
     exact match/F1 score computation as in the SQuAD script.
 
@@ -292,6 +298,7 @@ def validate_official(args, data_loader, model, global_stats,
 
     # Run through examples
     examples = 0
+    predictions = []
     for ex in data_loader:
         ex_id, batch_size = ex[-1], ex[0].size(0)
         pred_s, pred_e, _ = model.predict(ex)
@@ -300,9 +307,10 @@ def validate_official(args, data_loader, model, global_stats,
             s_offset = offsets[ex_id[i]][pred_s[i][0]][0]
             e_offset = offsets[ex_id[i]][pred_e[i][0]][1]
             prediction = texts[ex_id[i]][s_offset:e_offset]
-
+            predictions.append(prediction)
             # Compute metrics
             ground_truths = answers[ex_id[i]]
+            # print(prediction, ground_truths)
             exact_match.update(utils.metric_max_over_ground_truths(
                 utils.exact_match_score, prediction, ground_truths))
             f1.update(utils.metric_max_over_ground_truths(
@@ -315,6 +323,8 @@ def validate_official(args, data_loader, model, global_stats,
                 'F1 = %.2f | examples = %d | valid time = %.2f (s)' %
                 (f1.avg * 100, examples, eval_time.time()))
 
+    if args.predict:
+        return {'exact_match': exact_match.avg * 100, 'f1': f1.avg * 100}, predictions
     return {'exact_match': exact_match.avg * 100, 'f1': f1.avg * 100}
 
 
@@ -478,33 +488,48 @@ def main(args):
     logger.info('-' * 100)
     logger.info('Starting training...')
     stats = {'timer': utils.Timer(), 'epoch': 0, 'best_valid': 0}
-    for epoch in range(start_epoch, args.num_epochs):
-        stats['epoch'] = epoch
+    f1_scores = []
+    exact_match_scores = []
 
-        # Train
-        train(args, train_loader, model, stats)
+    # Just save predictions on model
+    if args.predict:
+        results, predictions = validate_official(args, dev_loader, model, stats,
+                                        dev_offsets, dev_texts, dev_answers)
+        pickle.dump(predictions, open(args.predictions, 'wb'))
+        return results['f1'], results['exact_match']
 
-        # Validate unofficial (train)
-        validate_unofficial(args, train_loader, model, stats, mode='train')
+    else:
+        for epoch in range(start_epoch, args.num_epochs):
+            stats['epoch'] = epoch
 
-        # Validate unofficial (dev)
-        result = validate_unofficial(args, dev_loader, model, stats, mode='dev')
+            # Train
+            train(args, train_loader, model, stats)
 
-        # Validate official
-        if args.official_eval:
-            result = validate_official(args, dev_loader, model, stats,
-                                       dev_offsets, dev_texts, dev_answers)
+            # Validate unofficial (train)
+            validate_unofficial(args, train_loader, model, stats, mode='train')
 
-        # Save best valid
-        if result[args.valid_metric] > stats['best_valid']:
-            logger.info('Best valid: %s = %.2f (epoch %d, %d updates)' %
-                        (args.valid_metric, result[args.valid_metric],
-                         stats['epoch'], model.updates))
-            model.save(args.model_file)
-            stats['best_valid'] = result[args.valid_metric]
+            # Validate unofficial (dev)
+            result = validate_unofficial(args, dev_loader, model, stats, mode='dev')
+
+            # Validate official
+            if args.official_eval:
+                result = validate_official(args, dev_loader, model, stats,
+                                        dev_offsets, dev_texts, dev_answers)
+
+            # Save best valid
+            if result[args.valid_metric] > stats['best_valid']:
+                logger.info('Best valid: %s = %.2f (epoch %d, %d updates)' %
+                            (args.valid_metric, result[args.valid_metric],
+                            stats['epoch'], model.updates))
+                model.save(args.model_file)
+                stats['best_valid'] = result[args.valid_metric]
+
+            f1_scores.append(result['f1'])
+            exact_match_scores.append(result['exact_match'])
+        return f1_scores, exact_match_scores
 
 
-if __name__ == '__main__':
+def train_drqa(cmdline_args, use_cuda=True):
     # Parse cmdline args and setup environment
     parser = argparse.ArgumentParser(
         'DrQA Document Reader',
@@ -512,11 +537,12 @@ if __name__ == '__main__':
     )
     add_train_args(parser)
     config.add_model_args(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(cmdline_args)
     set_defaults(args)
 
     # Set cuda
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    #args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.cuda = use_cuda and torch.cuda.is_available()
     if args.cuda:
         torch.cuda.set_device(args.gpu)
 
@@ -543,4 +569,4 @@ if __name__ == '__main__':
     logger.info('COMMAND: %s' % ' '.join(sys.argv))
 
     # Run!
-    main(args)
+    return main(args)
